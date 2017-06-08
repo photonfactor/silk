@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+    <head>
+        <title>sketch.js &raquo; Basic Example</title>
+        <!-- <link rel="stylesheet" href="css/example.css"> -->
+        <link rel="stylesheet" type="text/css" href="../../css/silk.css">
+        <style type="text/css">
+            html, body {
+                background: rgb(197, 157, 204);
+            }
+        </style>
+    </head>
+    <body style="overflow:hidden">
+        <div class="blurb" style="pointer-events: none">
+            <div class="title">Solver-Based UI</div>
+            <div class="description">Ceres Solver tries to maintain a fixed distance between the cursor and circle.</div>
+        </div>
+
+        <div class="navigation" style="pointer-events:none">
+            <a href="../../" style="pointer-events:all">Top</a> / <a href="../../about.html" style="pointer-events:all">About</a>
+        </div>
+
+        <div id="container"></div>
+        <script src="../../js/sketch.js"></script>
+        <script src="solver.js"></script>
+        <script>
+
+            var circle = {x: -100, y: -100};
+            var cursor = {x: -100, y: -100};
+            var radius = 30;
+            var thickness = 10;
+            var solver;
+
+            Sketch.create({
+                container: document.getElementById( 'container' ),
+                setup: function() {
+                    solver = new Module.AvoiderSolver;
+                },
+                touchmove: function() {
+                    cursor.x = this.touches[0].x;
+                    cursor.y = this.touches[0].y;
+                    solver.goal_pose = [cursor.x, cursor.y];
+                },
+                update: function() {
+                    solver.timeSolve(0.1);
+                    circle.x = solver.current_pose[0];
+                    circle.y = solver.current_pose[1];
+                },
+                draw: function() {
+                    // draw line from cursor to annulus
+                    this.beginPath();
+                    this.lineWidth = 2*thickness;
+                    this.strokeStyle = '#333333';
+                    this.lineCap = 'round';
+                    this.moveTo(circle.x, circle.y);
+                    this.lineTo(cursor.x, cursor.y);
+                    this.stroke();
+                    // draw annulus that avoids the cursor
+                    this.beginPath();
+                    this.arc( circle.x, circle.y, radius + thickness, 0, TWO_PI );
+                    this.lineWidth = thickness;
+                    this.globalAlpha = 0.5;
+                    this.strokeStyle = '#CCCCCC';
+                    this.stroke();
+                }
+            });
+
+        </script>
+    </body>
+</html>

@@ -1,0 +1,1509 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <title>Silk - Regularized IK</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+        <link rel="stylesheet" type="text/css" href="../../css/silk.css">
+    </head>
+    <body style="background-color: #cccccc; overflow: hidden">
+        <div class="column">
+
+            <div class="blurb">
+                <div class="title">Regularized IK</div>
+                <div class="description">To discourage large motions, a Huber loss is imposed on the joint deltas.</div>
+            </div>
+
+            <div class="navigation">
+<!--                <a href="../../">Top</a> / <a href="../../about.html">About</a>-->
+            </div>
+
+            <!--  <script src="http://cdnjs.cloudflare.com/ajax/libs/three.js/r73/three.min.js"></script> -->
+            <script src="../../js/three.min.js"></script>
+            <script src="../../js/loaders/ColladaLoader.js"></script>
+            <script src="../../js/renderers/CanvasRenderer.js"></script>
+            <script src="../../js/renderers/Projector.js"></script>
+            <script src="../../js/controls/OrbitControls.js"></script>
+            <script src="../../js/Detector.js"></script>
+            <script src="../../js/sketch.js"></script>
+            <script src="../../js/libs/Tween.js"></script>
+            <script src="../../js/libs/stats.min.js"></script>
+            <script src="../../js/libs/dat.gui.js"></script>
+            <script src="solver.js"></script>
+
+            <script>
+
+                if ( ! Detector.webgl ) Detector.addGetWebGLMessage();
+
+                var container, stats;
+
+                var camera, scene, renderer, renderer2d, objects;
+                var controls;
+                var sketch;
+                var particleLight;
+                var raycaster, dragging_object;
+
+                var solver;
+                var linkToIndex = {};
+
+                var gripper_guides;
+                var drag_point_visual;
+
+                var dae;
+                var collada;
+
+                var kinematics;
+                
+                var controlsGUI;
+                
+                var lastJointValue;
+                var tweenJoint;
+                var lastAngle;
+                
+                var performIK = false;                
+
+                var cursor = new THREE.Vector2( -200, -200 );
+                var cursor_normalized = new THREE.Vector2( -200, -200 );
+                var drag_point = new THREE.Vector3( 0, 0, 0);
+                var point3d = new THREE.Vector3( 0, 0, 0);
+                var projected_point = new THREE.Vector2( -200, -200 );
+                var projected_point2 = new THREE.Vector2( -200, -200 );                
+                var radius = 10;
+                var thickness = 10;
+
+                var arm_link_name = 'l_shoulder_pan_link';
+                var arm_joint_idx;
+
+                var loader = new THREE.ColladaLoader();
+                loader.options.convertUpAxis = true;
+                loader.load( '../../models/pr2/collada/openrave-pr2.dae', function ( collada_ ) {
+
+                    collada = collada_;
+                    dae = collada.scene;
+
+                    dae.traverse( function ( child ) {
+
+                        if ( child instanceof THREE.Mesh ) {
+
+                            child.geometry.computeFaceNormals();
+                            child.material.shading = THREE.FlatShading;
+
+                        }
+
+                    } );
+
+                    dae.scale.x = dae.scale.y = dae.scale.z = 10.0;
+                    dae.updateMatrix();
+
+                    kinematics = collada.kinematics;
+
+                    createSketch();
+
+                } );
+
+                renderer = new THREE.WebGLRenderer({antialias: true, alpha: true});
+
+                function findJointByName(nodeName) { 
+                    for (var i = 0; i < 87; i++) {
+                        if (kinematics.jointMap[i].node.name == nodeName) {
+                            return i;
+                        }
+                    }
+                }
+                
+                function cameraProject(point3d, width, height) {
+                    var point2d = point3d.project(camera);
+                    var p = new THREE.Vector2;
+                    p.x =  (point2d.x + 1) / 2 * width;
+                    p.y = -(point2d.y - 1) / 2 * height;
+                    return p;
+                }
+
+                function localToWorldSceneGraph(point, link) {
+                    var drag_point_local = link.worldToLocal(point);
+                    var current_link = link;
+                    while (current_link.parent) {
+                        //console.log(current_link.name);
+                        drag_point_local.applyMatrix4(current_link.matrix);
+                        current_link = current_link.parent;
+                    }
+                    return point;
+                }
+
+                function projectPoint() {
+                    var arm = dae.getObjectByName(arm_link_name);
+                    raycaster.setFromCamera( cursor_normalized, camera );
+                    var intersects = raycaster.intersectObject( arm, true );
+                    if (intersects.length > 0) {
+                        var link = intersects[0].object.parent;
+                        var point = intersects[0].point.clone();
+                        point = localToWorldSceneGraph(point.clone(), link);
+                        projected_point = cameraProject(point, renderer2d.domElement.width, renderer2d.domElement.height);
+                    }
+                }
+
+                function transformToMatrix(transform) {
+                    var m1 = new THREE.Matrix4();
+                    switch ( transform.type ) {
+                        case 'matrix':
+                            return transform.obj;
+                        case 'translate':
+                            return m1.makeTranslation( transform.obj.x, transform.obj.y, transform.obj.z );
+                        case 'rotate':
+                            return m1.makeRotationAxis( transform.obj, transform.angle );
+                    }
+                }
+
+                function createSketch() {
+                    sketch = Sketch.create({
+                        type: Sketch.WEBGL,
+                        // Use existing element
+                        element: renderer.domElement,
+                        // Use existing context
+                        context: renderer.context,
+                        setup: init,
+                        resize: onWindowResize,
+                        draw: animate,
+                        mousedown: handleMouseDown,
+                        mouseup: handleMouseUp,
+                        touchstart: handleMouseDown,
+                        touchend: handleMouseUp, 
+                        touchmove: function() {
+                            // calculate mouse position in normalized device coordinates
+                            // (-1 to +1) for both components
+                            cursor_normalized.x = ( this.touches[0].x / window.innerWidth ) * 2 - 1;
+                            cursor_normalized.y = - ( this.touches[0].y / window.innerHeight ) * 2 + 1;
+                            cursor.x = this.touches[0].x;
+                            cursor.y = this.touches[0].y;
+                        },
+                        autopause: false
+                    });
+                }
+
+                N_JOINTS = 6;
+                //N_JOINTS = 4;
+                function initSolverSceneGraph(link, arm) {
+                    // Called once when the DAE is finished loading
+                    //   this function is idempotent - running it twice does nothing.
+                    //   this is just a hack because I can't find the right place to
+                    //   call this after DAE loads, so I call it repeatedly
+                    if (solver.getNumTransforms() == 0) {
+                        console.log('initializing solver scene graph in initSolverSceneGraph');
+                        // first enumerate the links connecting 'link' to 'arm'
+                        var links = [];
+                        var current_link = link;
+                        while (current_link.parent) {
+                            console.log(current_link.name);
+                            links.push(current_link);
+                            if (current_link.name == arm.name) {
+                                break;
+                            }
+                            current_link = current_link.parent;
+                        }
+                        console.log(links);
+                        // then, starting with 'arm', add links to the solver until N_JOINTS joints have been added
+                        // arm to world
+                        solver.addStaticTransform(arm.parent.matrixWorld.elements);
+                        var num_joints = 0;
+                        for (var i = links.length - 1; i >= 0; i--) {
+                            var putative_joint = findJointByName(links[i].name);
+                            console.log('putative_joint = ' + putative_joint);
+                            if (putative_joint == null || kinematics.jointMap[putative_joint].joint.static || num_joints >= N_JOINTS) {
+                                console.log('adding static transform for ' + links[i].name);
+                                solver.addStaticTransform(links[i].matrix.elements);
+                                linkToIndex[links[i].name] = solver.getNumTransforms() - 1;
+                            } else {
+                                console.log('adding joint for ' + links[i].name);
+                                 // Set static transforms
+                                var transforms = kinematics.jointMap[putative_joint].transforms;
+                                var m01 = transformToMatrix(transforms[0]).multiply(transformToMatrix(transforms[1]));
+                                var m34 = transformToMatrix(transforms[3]).multiply(transformToMatrix(transforms[4]));
+                                solver.addStaticTransform(m01.elements);
+                                console.log('kinematics.jointMap[putative_joint].joint.limits.min = ' + kinematics.jointMap[putative_joint].joint.limits.min);
+                                console.log('kinematics.jointMap[putative_joint].joint.limits.max= ' + kinematics.jointMap[putative_joint].joint.limits.max);
+                                solver.addJointTransform(kinematics.jointMap[putative_joint].joint.limits.min,
+                                                         kinematics.jointMap[putative_joint].joint.limits.max);
+                                solver.addStaticTransform(m34.elements); 
+                                linkToIndex[links[i].name] = solver.getNumTransforms() - 1;
+                                num_joints++;
+                            }
+                        }
+                    }
+                }
+
+                function initIK(point, link, arm) {
+                    // Called once at the beginning of a drag in order to reset the IK optimization
+                    initSolverSceneGraph(dae.getObjectByName('l_gripper_palm_link'), arm);
+
+                    // Set drag point
+                    drag_point = point;
+                    var nearest_link = link;
+                    while (!linkToIndex[nearest_link.name]) {
+                        nearest_link = nearest_link.parent;
+                    }
+                    var drag_point_local = nearest_link.worldToLocal(drag_point.clone());
+                    solver.drag_point = [drag_point_local.x, drag_point_local.y, drag_point_local.z];
+                    solver.setStartTransformIndex( linkToIndex[nearest_link.name] );
+
+                    // Set initial pose
+                    solver.setInitialJointValues();
+                    
+                    // Visualize the drag point
+//                    if (performIK) {
+//                        var link2 = dae.getObjectByName('l_gripper_l_finger_tip_link');                        
+//                        var position = link2.getWorldPosition();
+//                        drag_point_visual.position.set(position.x, position.y, position.z);
+//                        drag_point_visual = true;
+//                    }
+//                    else {
+//                        drag_point_visual.position.set(drag_point_local.x, drag_point_local.y, drag_point_local.z);
+//                    }
+                    drag_point_visual.position.set(drag_point_local.x, drag_point_local.y, drag_point_local.z);
+                    if (drag_point_visual.parent) {
+                        drag_point_visual.parent.remove(drag_point_visual);
+                    }
+                    nearest_link.add(drag_point_visual);
+
+                    // Set screen size
+                    solver.setDims([renderer2d.domElement.width, renderer2d.domElement.height]);
+
+                    // Set camera matrix
+                    var a = new THREE.Matrix4;
+                    a.multiplyMatrices(camera.projectionMatrix, a.getInverse(camera.matrixWorld));
+                    solver.setCameraMatrix(a.elements);
+                }
+
+                function solveIK() {
+                    solver.screen_point = [cursor.x, cursor.y];
+                    solver.timeSolve(0.1);
+                    for (var i = 0; i < N_JOINTS; i++) {
+                        kinematics.setJointValue(arm_joint_idx + i, solver.getJointValue(i));
+                    }
+                }
+
+                function setDragging(dragging) {
+                    dragging_object = dragging;
+                    drag_point_visual.visible = dragging;
+                    controls.enabled = !dragging;
+                    controls.enableRotate = !dragging;
+                }
+
+                function handleMouseDown() {
+                    // update the picking ray with the camera and mouse position    
+                    raycaster.setFromCamera( cursor_normalized, camera );   
+                    // calculate objects intersecting the picking ray
+                    var arm = dae.getObjectByName(arm_link_name);
+                    var intersects = raycaster.intersectObject( arm, true );
+                    if (intersects.length > 0) {
+                        controlsGUI.linkX = intersects[0].point.x;
+                        controlsGUI.linkY = intersects[0].point.y;
+                        controlsGUI.linkZ = intersects[0].point.z;
+                        initIK(intersects[0].point, intersects[0].object.parent, arm);
+                        setDragging(true);
+                    } else {
+                        setDragging(false);
+                    }
+                }
+
+                function handleMouseUp() {
+                    setDragging(false);
+                }
+
+                function init() {
+
+                    //container = document.createElement( 'div' );
+                    //document.body.appendChild( container );
+
+                    solver = new Module.IKSolver;
+
+                    raycaster = new THREE.Raycaster();
+                    mouse = new THREE.Vector2();
+
+                    camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, 1, 2000 );
+                    camera.position.set( 33.2473216212127, 22.57002219279167, -19.15198843903227); 
+
+                    scene = new THREE.Scene();
+                    
+                    // add axes to the world for reference
+                    var axes = new THREE.AxisHelper(20);
+                    scene.add( axes );
+
+                    // Grid
+                    var size = 50, step = 1;
+                    //var size = 14, step = 1;
+
+                    var geometry = new THREE.Geometry();
+                    var material = new THREE.LineBasicMaterial( { color: 0x999999 } );
+
+                    for ( var i = - size; i <= size; i += step ) {
+
+                        geometry.vertices.push( new THREE.Vector3( - size, - 0.04, i ) );
+                        geometry.vertices.push( new THREE.Vector3(   size, - 0.04, i ) );
+
+                        geometry.vertices.push( new THREE.Vector3( i, - 0.04, - size ) );
+                        geometry.vertices.push( new THREE.Vector3( i, - 0.04,   size ) );
+
+                    }
+
+                    var line = new THREE.LineSegments( geometry, material );
+                    scene.add( line );
+
+                    // Add the COLLADA
+                    THREE.Object3D.prototype.traverseDepth = function (a, i) {if(!1!==this.visible){a(this, i);for(var b=this.children,c=0,d=b.length;c<d;c++)b[c].traverseDepth(a,i+1)}};
+                    dae.traverseDepth(function(obj, i) { if (obj.material) { obj.material.color.setHex(0x999999) ; } }, 0);
+                    dae.getObjectByName(arm_link_name).traverseDepth(function(obj, i) { if (obj.material) { obj.material.color.setHex(0x669966) ; } }, 0);
+                    scene.add( dae );
+
+                    // Gripper guides
+                    var material = new THREE.LineBasicMaterial( { color: 0xff3333, linewidth: 1 } );
+                    gripper_guides = [];
+                    for (var i = 0; i < 2; i++) {
+                        var geometry = new THREE.Geometry();
+                        geometry.vertices.push(new THREE.Vector3);
+                        geometry.vertices.push(new THREE.Vector3);
+                        gripper_guides.push(new THREE.Line(geometry, material));
+                        scene.add(gripper_guides[i]);
+                    }
+
+                    // Drag point visual
+                    var material = new THREE.MeshBasicMaterial( { color: 0x000000 } );
+                    var geometry = new THREE.SphereGeometry(0.01); 
+                    drag_point_visual = new THREE.Mesh( geometry, material );
+                    drag_point_visual.visible = false;
+
+                    // Arm index
+                    arm_joint_idx = findJointByName(arm_link_name);
+
+                    // Lights
+                    particleLight = new THREE.Mesh( new THREE.SphereGeometry( 4, 8, 8 ), new THREE.MeshBasicMaterial( { color: 0xffffff } ) );
+                    particleLight.position.set(-2611.7403539515544, -3454.272981693232, -1494.286894656113);
+                    scene.add( particleLight );
+
+                    var light = new THREE.HemisphereLight( 0x333333, 0xffeeee );
+                    scene.add( light );
+
+                    var pointLight = new THREE.PointLight( 0xffffff, 0.3 );
+                    particleLight.add( pointLight );
+
+                    renderer.setClearColor( 0x000000, 0 );
+                    renderer.setPixelRatio( window.devicePixelRatio );
+                    renderer.setSize( window.innerWidth, window.innerHeight );
+                    //container.appendChild( renderer.domElement );
+
+                    renderer2d = new THREE.CanvasRenderer({antialias: true, alpha: true});
+                    renderer2d.setClearColor( 0x000000, 0 );
+                    renderer2d.setSize( window.innerWidth, window.innerHeight );
+                    document.body.appendChild( renderer2d.domElement );
+                    renderer2d.domElement.style.pointerEvents = 'none';
+
+                    controls = new THREE.OrbitControls( camera, renderer.domElement );
+
+                    // turns out you need to wait a cycle until matrixWorld is updated
+                    // initSolverSceneGraph(dae.getObjectByName(arm_link_name));
+
+                    stats = new Stats();
+                    stats.domElement.style.position = 'absolute';
+                    stats.domElement.style.top = '0px';
+                    //container.appendChild( stats.domElement );
+                    
+                    var pr2Joints = {};
+                    var easings = {};
+                    var joint;
+                    var name;                    
+                    
+                    controlsGUI = new function () {
+                        //this.scaleX = 10;
+                        //this.scaleY = 10;
+                        //this.scaleZ = 10;
+
+                        this.positionX = 0;
+                        //this.positionY = 4;
+                        this.positionZ = 0;
+
+                        //this.rotationX = 0;
+                        this.rotationY = 0;
+                        //this.rotationZ = 0;
+
+                        this.translateX = 0;
+                        //this.translateY = 0;
+                        this.translateZ = 0;
+
+                        this.visible = true;
+                        
+                        this.startX   = 0;
+                        //this.startY   = 0;
+                        this.startZ   = 0;
+                        
+                        this.lastAngle = 0;
+                        
+                        this.speed       = 0;
+                        this.distance    = 0;
+                        
+                        this.speedX      = 0;
+                        //this.speedY     = 0;
+                        this.speedZ      = 0;
+                        this.targetAngle = 0;
+                        
+                        this.endX     = 0;
+                        //this.endY     = 0;
+                        this.endZ     = 0;
+                        this.angle    = 0;
+                        
+                        this.index    = 0;
+                        this.min      = 0.0;
+                        this.max      = 0.0;
+                        this.joint    = 'l_shoulder_lift_link';
+                        
+                        for ( var i = 0; i < 87; i ++ ) {
+                            joint = kinematics.jointMap[ i ];
+                            name = joint.node.name;
+                            //console.log('name: ' + name );
+                            //lowerLimit = joint.limits.min;
+                            //upperLimit = joint.limits.max;
+
+                            pr2Joints[name] = name;
+                            //console.log('name: ' + name );
+                        }                         
+                        
+                        this.linkX    = 0;
+                        this.linkY    = 0;
+                        this.linkZ    = 0;
+                        this.newLinkX = 0;
+                        this.newLinkY = 0;
+                        this.newLinkZ = 0;
+                        
+                        //this.step     = 1;
+                        this.duration = 2500;
+                        this.delay    = 200;
+                        this.easing   = 'Linear.None';
+                        
+                        Object.keys(TWEEN.Easing).forEach(function(family){
+                            Object.keys(TWEEN.Easing[family]).forEach(function(direction){
+                                var name = family+'.'+direction;
+                                easings[name] = name;
+                            });
+                        });                         
+
+                        this.translate = function () {
+
+                            dae.translateX(controlsGUI.translateX);
+                            //dae.translateY(controlsGUI.translateY);
+                            dae.translateZ(controlsGUI.translateZ);
+
+                            controlsGUI.positionX = dae.position.x;
+                            //controlsGUI.positionY = dae.position.y;
+                            controlsGUI.positionZ = dae.position.z;
+                        };
+                        
+                        this.go = function () {
+                            setupTween();
+                            console.log(dae);
+                        };
+                        
+                        this.rotateAndGo = function () {
+                            rotateAndGo();
+                        };
+                        
+                        this.moveJoint = function () {
+                            moveJoint();
+                        };
+                        
+                        this.moveLink = function () {
+                            handleMoveLink();
+                        };
+                        
+                        this.stop = function () {
+                            //TWEEN.remove(tweenJoint);
+                            tweenJoint.stop();
+                        };
+                    };
+                    
+                    var gui = new dat.GUI();
+                    
+//                    var guiScale = gui.addFolder('scale');
+//                    var scaX = guiScale.add(controlsGUI, 'scaleX', 0, 20);
+//                    var scaY = guiScale.add(controlsGUI, 'scaleY', 0, 20);
+//                    var scaZ = guiScale.add(controlsGUI, 'scaleZ', 0, 20);
+//
+//                    scaX.listen();
+//                    scaX.onChange(function (value) {
+//                        dae.scale.x = controlsGUI.scaleX;
+//                    });
+//
+//                    scaY.listen();
+//                    scaY.onChange(function (value) {
+//                        dae.scale.y = controlsGUI.scaleY;
+//                    });
+//
+//                    scaZ.listen();
+//                    scaZ.onChange(function (value) {
+//                        dae.scale.z = controlsGUI.scaleZ;
+//                    });
+
+
+                    guiPosition = gui.addFolder('position');
+                    var posX = guiPosition.add(controlsGUI, 'positionX', -100, 100);
+                    var posZ = guiPosition.add(controlsGUI, 'positionZ', -100, 100);
+                    //guiPosition.open();
+
+                    posX.listen();
+                    posX.onChange(function (value) {
+                        dae.position.x = controlsGUI.positionX;
+                    });
+
+                    posZ.listen();
+                    posZ.onChange(function (value) {
+                        dae.position.z = controlsGUI.positionZ;
+                    });
+
+
+                    var guiRotation = gui.addFolder('rotation');
+                    //var rotX = guiRotation.add(controlsGUI, 'rotationX', -4, 4);
+                    var rotY = guiRotation.add(controlsGUI, 'rotationY', -4, 4);
+                    //var rotZ = guiRotation.add(controlsGUI, 'rotationZ', -4, 4);
+
+                    //rotX.listen();
+                    //rotX.onChange(function (value) {
+                    //    dae.rotation.x = controlsGUI.rotationX;
+                    //});
+
+                    rotY.listen();
+                    rotY.onChange(function (value) {
+                        dae.rotation.y = controlsGUI.rotationY;
+                    });
+
+                    //rotZ.listen();
+                    //rotZ.onChange(function (value) {
+                    //    dae.rotation.z = controlsGUI.rotationZ;
+                    //});
+
+
+                    var guiTranslate = gui.addFolder('translate');
+
+                    guiTranslate.add(controlsGUI, 'translateX', -10, 10);
+                    //guiTranslate.add(controlsGUI, 'translateY', -10, 10);
+                    guiTranslate.add(controlsGUI, 'translateZ', -10, 10);
+                    guiTranslate.add(controlsGUI, 'translate');
+
+                    var vis = gui.add(controlsGUI, 'visible');
+                    vis.listen();
+                    vis.onChange(function (value) {
+                        dae.visible = controlsGUI.visible;
+                    });                    
+                    
+                    var change = function () {
+                        setupTween();
+                    }
+                    
+                    
+                    var guiNavigation = gui.addFolder('navigation');
+                    //guiNavigation.add(controlsGUI, 'lastAngle').listen();
+                    
+                    //guiNavigation.add(controlsGUI, 'speed', -100, 100);
+                    //guiNavigation.add(controlsGUI, 'distance', -100, 100);
+                    
+                    //guiNavigation.add(controlsGUI, 'speedX', -100, 100);
+                    //guiNavigation.add(controlsGUI, 'speedY', -100, 100);
+                    //guiNavigation.add(controlsGUI, 'speedZ', -100, 100);
+                    
+                    guiNavigation.add(controlsGUI, 'endX', -100, 100).listen();
+                    //guiNavigation.add(controlsGUI, 'endY', -100, 100);
+                    guiNavigation.add(controlsGUI, 'endZ', -100, 100).listen();
+                    //guiNavigation.add(controlsGUI, 'angle', -360, 360);
+                    guiNavigation.add(controlsGUI, 'targetAngle', -360, 360).listen();
+                    guiNavigation.open();
+                    
+                    joint = kinematics.jointMap[findJointByName(controlsGUI.joint)]
+                    controlsGUI.index = findJointByName(controlsGUI.joint);
+                    controlsGUI.min = joint.joint.limits.min;
+                    controlsGUI.max = joint.joint.limits.max;                    
+                    
+                    var guiJointMovement = gui.addFolder('joint movement');
+                    guiJointMovement.add(controlsGUI, 'index').name('Index of joint').listen();
+                    guiJointMovement.add(controlsGUI, 'min').name('Min of joint').listen();
+                    guiJointMovement.add(controlsGUI, 'max').name('Max of joint').listen();
+                    guiJointMovement.add(controlsGUI, 'joint').name('Joint Name').options(pr2Joints).onChange(moveJoint);                    
+                    guiJointMovement.open();
+                    
+                    var guiLinkMovement = gui.addFolder('link movement');
+                    guiLinkMovement.add(controlsGUI, 'linkX').listen();
+                    guiLinkMovement.add(controlsGUI, 'linkY').listen();
+                    guiLinkMovement.add(controlsGUI, 'linkZ').listen();
+                    guiLinkMovement.add(controlsGUI, 'newLinkX', -30, 30)
+                        .onChange(function () {
+                            //drag_point_visual.visible = true;
+                            handleMoveLink();
+                        });
+                    guiLinkMovement.add(controlsGUI, 'newLinkY', -30, 30)
+                        .onChange(function () {
+                            //drag_point_visual.visible = true;
+                            handleMoveLink();
+                        });
+                    guiLinkMovement.add(controlsGUI, 'newLinkZ', -30, 30)
+                        .onChange(function () {
+                            //drag_point_visual.visible = true;
+                            handleMoveLink();
+                        });
+//                    guiLinkMovement.add(controlsGUI, 'newLinkX', -20, 20).listen()
+//                        .onChange(function () {
+//                            handleMoveLink();
+//                        });
+//                    guiLinkMovement.add(controlsGUI, 'newLinkY', -20, 20).listen()
+//                        .onChange(function () {
+//                            handleMoveLink();
+//                        });
+//                    guiLinkMovement.add(controlsGUI, 'newLinkZ', -20, 20).listen()
+//                        .onChange(function () {
+//                            handleMoveLink();
+//                        });
+                    guiLinkMovement.open();
+                    
+                    
+                    gui.add(controlsGUI, 'duration').name('Duration (ms)').min(100).max(4000).onChange(setupTween);
+                    gui.add(controlsGUI, 'delay').name('Delay (ms)').min(0).max(1000).onChange(setupTween);
+                    gui.add(controlsGUI, 'easing').name('Easing Curve').options(easings).onChange(setupTween);
+                    //gui.add(controlsGUI, 'joint').name('Joint Name').options(pr2Joints).onChange(moveJoint);                    
+                    
+                    gui.add(controlsGUI, 'go');
+                    gui.add(controlsGUI, 'rotateAndGo');
+                    gui.add(controlsGUI, 'moveJoint');
+                    gui.add(controlsGUI, 'moveLink');
+                    gui.add(controlsGUI, 'stop');
+
+                    //setupTween();
+                    //moveJoint();                    
+                }
+                
+                
+                function rotateAndGo() {
+                    
+                    console.log('Start dae.rotation.y: ' + dae.rotation.y*(180/Math.PI));
+                    
+                    var update = function () {
+                        dae.position.x = startPos.x;
+                        dae.position.z = startPos.z;
+                    }
+                    
+                    TWEEN.removeAll();
+                    
+                    var easing	= TWEEN.Easing[controlsGUI.easing.split('.')[0]][controlsGUI.easing.split('.')[1]];
+                    
+                    // Add some physics properties
+                    dae.vz = 0;
+                    dae.vx = 0;
+                    dae.accelerationZ = 0.2;
+                    dae.accelerationX = 0.2;
+                    
+                    // Create a vector for the robot's current rotation/orientation and get its unit vector
+                    var v1 = new THREE.Vector2();
+                    v1.width = Math.cos(0.5*Math.PI + dae.rotation.y);
+                    v1.height = Math.sin(0.5*Math.PI + dae.rotation.y);
+                    //var v1Slope = v1.height / v1.width || 0;
+                    console.log("v1.width = " + v1.width);
+                    var v1Slope;
+                    if (v1.width == 0.0 || (v1.width < 1e-12 && v1.width > -1e-12)) {
+                        if (v1.height > 0) {
+                            v1Slope = 1e12;
+                            //v1Slope = Infinity;
+                        }
+                        else {
+                            v1Slope = -1e12;
+                            //v1Slope = -Infinity;
+                        }
+                    }
+                    else {
+                        v1Slope = v1.height / v1.width;
+                        //v1Slope = v1Slope.toFixed(1);
+                    }
+                    v1.normalize();
+                    
+                    
+                    // Create a vector for the robot's current position to the target position
+                    var performTranslation = true;
+                    var v2 = new THREE.Vector2();
+                    v2.width = controlsGUI.endZ - dae.position.z;
+                    v2.height = controlsGUI.endX - dae.position.x;
+                    if (v2.width == 0.0 && v2.height == 0.0) {
+                        console.log("v2.width and v2.height are both 0!");
+                        v2.width = v1.width;
+                        v2.height = v1.height;
+                        performTranslation = false;
+                    }
+                    v2.normalize();
+                    console.log('v2.width: ' + v2.width);
+                    console.log('v2.height: ' + v2.height);
+                    
+                    var degToRad = THREE.Math.degToRad;
+                    var radToDeg = THREE.Math.radToDeg;
+                    
+                    // Take dot product to figure out angle between v1 vector and v2 vector
+                    var angle1 = Math.acos(v1.dot(v2));
+                    //var angle1 = Math.abs(Math.acos(v1.dot(v2)));
+                    if (angle1 !== angle1) {
+                        console.log("angle1 is NaN");
+                        angle1 = 0;
+                    }
+                    angle1 = angle1.toFixed(3);
+                    var angle1InDeg = radToDeg(angle1);
+                    //angle1InDeg = angle1InDeg.toFixed(1);
+                    console.log('angle1InRad: ', angle1);
+                    console.log('angle1InDeg: ', angle1InDeg);
+                    
+                    var startPos = { x : dae.position.x, 
+                                     z : dae.position.z 
+                                   };
+                    var endPos = { x : controlsGUI.endX, 
+                                   z : controlsGUI.endZ 
+                                 };
+                    
+                    
+                    var robotAdjustedAngle = 0.5*Math.PI + dae.rotation.y;
+                    robotAdjustedAngle = adjustAngle(robotAdjustedAngle);
+                    console.log('robotAdjustedAngle: ' + radToDeg(robotAdjustedAngle));
+                    //var rotationString = "";
+                    var rotationString = "-" + angle1;
+                    
+                    if (v1Slope > 1e-12 && v1Slope < 1e12) {
+                        if ( (robotAdjustedAngle >= 0 && robotAdjustedAngle <= Math.PI) ||
+                             (robotAdjustedAngle >= -2*Math.PI && robotAdjustedAngle <= -Math.PI) ) {
+                            if ( controlsGUI.endX < v1Slope*( controlsGUI.endZ - dae.position.z) + dae.position.x ) {
+                                console.log('v1Slope +, UP, endX < slope');
+                                rotationString = "-" + angle1;
+                            }
+                            else if ( controlsGUI.endX > v1Slope*( controlsGUI.endZ - dae.position.z ) + dae.position.x ) {
+                                console.log('v1Slope +, UP, endX > slope');
+                                rotationString = "+" + angle1;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle > Math.PI && robotAdjustedAngle < 2*Math.PI) || 
+                                  (robotAdjustedAngle > -Math.PI && robotAdjustedAngle < 0) ) {
+                            if ( controlsGUI.endX < v1Slope*( controlsGUI.endZ - dae.position.z) + dae.position.x ) {
+                                console.log('v1Slope +, DOWN, endX < slope');
+                                rotationString = "+" + angle1;
+                            }
+                            else if ( controlsGUI.endX > v1Slope*( controlsGUI.endZ - dae.position.z ) + dae.position.x ) {
+                                console.log('v1Slope +, DOWN, endX > slope');
+                                rotationString = "-" + angle1;
+                            }
+                        }
+                    }
+                    else if (v1Slope < -1e-12 && v1Slope > -1e12) {
+                        if ( (robotAdjustedAngle >= 0 && robotAdjustedAngle <= Math.PI) ||
+                             (robotAdjustedAngle >= -2*Math.PI && robotAdjustedAngle <= -Math.PI) ) {
+                            if ( controlsGUI.endX < v1Slope*( controlsGUI.endZ - dae.position.z ) + dae.position.x ) {
+                                console.log('v1Slope -, UP, endX < slope');
+                                rotationString = "+" + angle1;
+                            }
+                            else if ( controlsGUI.endX > v1Slope*( controlsGUI.endZ - dae.position.z ) + dae.position.x ) {
+                                console.log('v1Slope -, UP, endX > slope');
+                                rotationString = "-" + angle1;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle > Math.PI && robotAdjustedAngle < 2*Math.PI) || 
+                                  (robotAdjustedAngle > -Math.PI && robotAdjustedAngle < 0) ) {                        
+                            if ( controlsGUI.endX < v1Slope*( controlsGUI.endZ - dae.position.z ) + dae.position.x ) {
+                                console.log('v1Slope -, DOWN, endX < slope');
+                                rotationString = "-" + angle1;
+                            }
+                            else if ( controlsGUI.endX > v1Slope*( controlsGUI.endZ - dae.position.z ) + dae.position.x ) {
+                                console.log('v1Slope -, DOWN, endX > slope');
+                                rotationString = "+" + angle1;
+                            }
+                        }
+                    }
+                    else if (v1Slope >= 1e12) {
+                    //else if (v1Slope === Infinity) {
+                        if ( (robotAdjustedAngle >= 0 && robotAdjustedAngle <= Math.PI) ||
+                             (robotAdjustedAngle >= -2*Math.PI && robotAdjustedAngle <= -Math.PI) ) {                       
+                            if ( controlsGUI.endZ < dae.position.z ) {
+                                console.log('v1Slope +Inf, UP, endZ < daeZ');
+                                rotationString = "+" + angle1;
+                            }
+                            else if ( controlsGUI.endZ > dae.position.z ) {
+                                console.log('v1Slope +Inf, UP, endZ > daeZ');
+                                rotationString = "-" + angle1;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle > Math.PI && robotAdjustedAngle < 2*Math.PI) || 
+                                  (robotAdjustedAngle > -Math.PI && robotAdjustedAngle < 0) ) {
+                            if ( controlsGUI.endZ < dae.position.z ) {
+                                console.log('v1Slope +Inf, DOWN, endZ < daeZ');
+                                rotationString = "-" + angle1;
+                            }
+                            else if ( controlsGUI.endZ > dae.position.z ) {
+                                console.log('v1Slope +Inf, DOWN, endZ > daeZ');
+                                rotationString = "+" + angle1;
+                            }
+                        }
+                    }
+                    else if (v1Slope <= -1e12) {
+                    //else if (v1Slope === -Infinity) {
+                        if ( (robotAdjustedAngle >= 0 && robotAdjustedAngle <= Math.PI) ||
+                             (robotAdjustedAngle >= -2*Math.PI && robotAdjustedAngle <= -Math.PI) ) {                        
+                            if ( controlsGUI.endZ < dae.position.z ) {
+                                console.log('v1Slope -Inf, UP, endZ < daeZ');
+                                rotationString = "-" + angle1;
+                            }
+                            else if ( controlsGUI.endZ > dae.position.z ) {
+                                console.log('v1Slope -Inf, UP, endZ > daeZ');
+                                rotationString = "+" + angle1;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle > Math.PI && robotAdjustedAngle < 2*Math.PI) || 
+                                  (robotAdjustedAngle > -Math.PI && robotAdjustedAngle < 0) ) {                        
+                            if ( controlsGUI.endZ < dae.position.z ) {
+                                console.log('v1Slope -Inf, DOWN, endZ < daeZ');
+                                rotationString = "+" + angle1;
+                            }
+                            else if ( controlsGUI.endZ > dae.position.z ) {
+                                console.log('v1Slope -Inf, DOWN, endZ > daeZ');
+                                rotationString = "-" + angle1;
+                            }
+                        }
+                    }
+                    else if (v1Slope >= -1e-12 && v1Slope <= 1e-12) {
+                        if ( (robotAdjustedAngle >= 0 && robotAdjustedAngle <= Math.PI) ||
+                             (robotAdjustedAngle >= -2*Math.PI && robotAdjustedAngle <= -Math.PI) ) {                          
+                            //rotationString = "-" + angle1;
+                            if ( controlsGUI.endX < dae.position.x ) {
+                                console.log('v1Slope 0, UP, endX < daeX');
+                                rotationString = "-" + angle1;
+                            }
+                            else if ( controlsGUI.endX > dae.position.x ) {
+                                console.log('v1Slope 0, UP, endX > daeX');
+                                rotationString = "+" + angle1;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle > Math.PI && robotAdjustedAngle < 2*Math.PI) || 
+                                  (robotAdjustedAngle > -Math.PI && robotAdjustedAngle < 0) ) {                        
+                            if ( controlsGUI.endX < dae.position.x ) {
+                                console.log('v1Slope 0, DOWN, endX < daeX');
+                                rotationString = "+" + angle1;
+                            }
+                            else if ( controlsGUI.endX > dae.position.x ) {
+                                console.log('v1Slope 0, DOWN, endX > daeX');
+                                rotationString = "-" + angle1;
+                            }
+                        }
+                    }
+                    
+
+                    console.log('rotationString: ' + rotationString, ";", parseInt(rotationString*180/Math.PI));
+                    //console.log('rotationString: ' + rotationString*(180/Math.PI));
+                    
+                    if (performTranslation) {
+                        var rotation = { angle : dae.rotation.y };                    
+                        var tweenRotate = new TWEEN.Tween(rotation)
+                            .to({ angle : rotationString }, controlsGUI.duration)
+                            .delay(controlsGUI.delay)
+                            .easing(easing)
+                            .onUpdate(function () {
+                                dae.rotation.y = rotation.angle;
+                                //dae.rotation.y = -(0.5*Math.PI - rotation.angle);
+                                //console.log('dae.rotation.y: ' + dae.rotation.y*(180/Math.PI));
+                                //console.log('rotation.angle: ' + rotation.angle*(180/Math.PI));
+                            })
+                            .onComplete(function () {
+                                console.log( 'Finished! dae.rotation.y: ' + (dae.rotation.y*(180/Math.PI)) );
+                                //lastAngle = angle;
+                            });
+
+                        var tweenStart	= new TWEEN.Tween(startPos)
+                            .to(endPos, controlsGUI.duration)
+                            .delay(controlsGUI.delay)
+                            .easing(easing)
+                            .onUpdate(function () {
+                                dae.position.x = startPos.x;
+                                dae.position.z = startPos.z;
+                            });
+                    }
+
+                    
+                    // Create a vector for the robot's updated rotation/orientation and get its unit vector
+                    var v3 = new THREE.Vector2();
+                    var updatedRotation = dae.rotation.y + parseFloat(rotationString);
+                    v3.width = Math.cos(0.5*Math.PI + updatedRotation);
+                    v3.height = Math.sin(0.5*Math.PI + updatedRotation);
+                    //var v3Slope = v3.height / v3.width || 0;
+                    console.log("v3.width = " + v3.width);
+                    var v3Slope;
+                    if (v3.width == 0.0 || (v3.width < 1e-12 && v3.width > -1e-12)) {
+                        if (v3.height > 0) {
+                            v3Slope = 1e12;
+                            //v3Slope = Infinity;
+                        }
+                        else {
+                            v3Slope = -1e12;
+                            //v1Slope = -Infinity;
+                        }
+                    }
+                    else {
+                        v3Slope = v3.height / v3.width;
+                        //v1Slope = v1Slope.toFixed(1);
+                    }
+                    v3.normalize();
+                    
+                    
+                    // Create a vector for the robot's target rotation/orientation and get its unit vector
+                    var v4 = new THREE.Vector2();
+                    v4.width = Math.cos(degToRad(controlsGUI.targetAngle));
+                    v4.height = Math.sin(degToRad(controlsGUI.targetAngle));
+//                    if (v4.width == 0.0 && v4.height == 0.0) {
+//                        console.log("v4.width and v4.height are both 0!");
+//                        v2.width = v1.width;
+//                        v2.height = v1.height;
+//                    }
+                    v4.normalize();
+                    console.log('v4.width: ' + v4.width);
+                    console.log('v4.height: ' + v4.height);
+                    
+                    // Take dot product to figure out angle between v3 vector and v4 vector
+                    var angle2 = Math.acos(v3.dot(v4));
+                    if (angle2 !== angle2) {
+                        console.log("angle2 is NaN");
+                        angle2 = 0;
+                    }
+                    angle2 = angle2.toFixed(3);
+                    var angle2InDeg = radToDeg(angle2);
+                    //angle2InDeg = angle2InDeg.toFixed(1);
+                    console.log('angle2InRad: ', angle2);
+                    console.log('angle2InDeg: ', angle2InDeg);
+                    
+                    
+                    //var rotation2 = { angle : dae.rotation.y };
+                    
+                    //var robotAdjustedAngle2 = 0.5*Math.PI + dae.rotation.y;
+                    var robotAdjustedAngle2 = 0.5*Math.PI + updatedRotation;
+                    robotAdjustedAngle2 = adjustAngle(robotAdjustedAngle2);
+                    console.log('robotAdjustedAngle2: ' + radToDeg(robotAdjustedAngle2));
+                    //var rotationString = "";
+                    var rotationString2 = "-" + angle2;
+                    
+                    if (v3Slope > 1e-12 && v3Slope < 1e12) {
+                        if ( (robotAdjustedAngle2 >= 0 && robotAdjustedAngle2 <= Math.PI) ||
+                             (robotAdjustedAngle2 >= -2*Math.PI && robotAdjustedAngle2 <= -Math.PI) ) {
+                            if ( (endPos.x + v4.height) < v3Slope*( (endPos.z + v4.width) - endPos.z) + endPos.x ) {
+                                console.log('v3Slope +, UP, v4.height < slope');
+                                rotationString2 = "-" + angle2;
+                            }
+                            else if ( (endPos.x + v4.height) > v3Slope*( (endPos.z + v4.width) - endPos.z) + endPos.x ) {
+                                console.log('v3Slope +, UP, v4.height > slope');
+                                rotationString2 = "+" + angle2;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle2 > Math.PI && robotAdjustedAngle2 < 2*Math.PI) || 
+                                  (robotAdjustedAngle2 > -Math.PI && robotAdjustedAngle2 < 0) ) {
+                            if ( (endPos.x + v4.height) < v3Slope*( (endPos.z + v4.width) - endPos.z) + endPos.x ) {
+                                console.log('v3Slope +, DOWN, v4.height < slope');
+                                rotationString2 = "+" + angle2;
+                            }
+                            else if ( (endPos.x + v4.height) > v3Slope*( (endPos.z + v4.width) - endPos.z) + endPos.x ) {
+                                console.log('v3Slope +, DOWN, v4.height > slope');
+                                rotationString2 = "-" + angle2;
+                            }
+                        }
+                    }
+                    else if (v3Slope < -1e-12 && v3Slope > -1e12) {
+                        if ( (robotAdjustedAngle2 >= 0 && robotAdjustedAngle2 <= Math.PI) ||
+                             (robotAdjustedAngle2 >= -2*Math.PI && robotAdjustedAngle2 <= -Math.PI) ) {
+                            if ( (endPos.x + v4.height) < v3Slope*( (endPos.z + v4.width) - endPos.z) + endPos.x ) {
+                                console.log('v3Slope -, UP, v4.height < slope');
+                                rotationString2 = "+" + angle2;
+                            }
+                            else if ( (endPos.x + v4.height) > v3Slope*( (endPos.z + v4.width) - endPos.z) + endPos.x ) {
+                                console.log('v3Slope -, UP, v4.height > slope');
+                                rotationString2 = "-" + angle2;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle2 > Math.PI && robotAdjustedAngle2 < 2*Math.PI) || 
+                                  (robotAdjustedAngle2 > -Math.PI && robotAdjustedAngle2 < 0) ) {                        
+                            if ( (endPos.x + v4.height) < v3Slope*( (endPos.z + v4.width) - endPos.z) + endPos.x ) {
+                                console.log('v3Slope -, DOWN, v4.height < slope');
+                                rotationString2 = "-" + angle2;
+                            }
+                            else if ( (endPos.x + v4.height) > v3Slope*( (endPos.z + v4.width) - endPos.z) + endPos.x ) {
+                                console.log('v3Slope -, DOWN, v4.height > slope');
+                                rotationString2 = "+" + angle2;
+                            }
+                        }
+                    }
+                    else if (v3Slope >= 1e12) {
+                    //else if (v1Slope === Infinity) {
+                        if ( (robotAdjustedAngle2 >= 0 && robotAdjustedAngle2 <= Math.PI) ||
+                             (robotAdjustedAngle2 >= -2*Math.PI && robotAdjustedAngle2 <= -Math.PI) ) {                       
+                            if ( (endPos.z + v4.width) < endPos.z ) {
+                                console.log('v3Slope +Inf, UP, v4.width < daeZ');
+                                rotationString2 = "+" + angle2;
+                            }
+                            else if ( (endPos.z + v4.width) > endPos.z ) {
+                                console.log('v3Slope +Inf, UP, v4.width > daeZ');
+                                rotationString2 = "-" + angle2;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle2 > Math.PI && robotAdjustedAngle2 < 2*Math.PI) || 
+                                  (robotAdjustedAngle2 > -Math.PI && robotAdjustedAngle2 < 0) ) {
+                            if ( (endPos.z + v4.width) < endPos.z ) {
+                                console.log('v3Slope +Inf, DOWN, v4.width < daeZ');
+                                rotationString2 = "-" + angle2;
+                            }
+                            else if ( (endPos.z + v4.width) > endPos.z ) {
+                                console.log('v3Slope +Inf, DOWN, v4.width > daeZ');
+                                rotationString2 = "+" + angle2;
+                            }
+                        }
+                    }
+                    else if (v3Slope <= -1e12) {
+                    //else if (v1Slope === -Infinity) {
+                        if ( (robotAdjustedAngle2 >= 0 && robotAdjustedAngle2 <= Math.PI) ||
+                             (robotAdjustedAngle2 >= -2*Math.PI && robotAdjustedAngle2 <= -Math.PI) ) {                        
+                            if ( (endPos.z + v4.width) < endPos.z ) {
+                                console.log('v3Slope -Inf, UP, v4.width < daeZ');
+                                rotationString2 = "-" + angle2;
+                            }
+                            else if ( (endPos.z + v4.width) > endPos.z ) {
+                                console.log('v3Slope -Inf, UP, v4.width > daeZ');
+                                rotationString2 = "+" + angle2;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle2 > Math.PI && robotAdjustedAngle2 < 2*Math.PI) || 
+                                  (robotAdjustedAngle2 > -Math.PI && robotAdjustedAngle2 < 0) ) {                        
+                            if ( (endPos.z + v4.width) < endPos.z ) {
+                                console.log('v3Slope -Inf, DOWN, v4.width < daeZ');
+                                rotationString2 = "+" + angle2;
+                            }
+                            else if ( (endPos.z + v4.width) > endPos.z ) {
+                                console.log('v3Slope -Inf, DOWN, v4.width > daeZ');
+                                rotationString2 = "-" + angle2;
+                            }
+                        }
+                    }
+                    else if (v3Slope >= -1e-12 && v3Slope <= 1e-12) {
+                        if ( (robotAdjustedAngle2 >= 0 && robotAdjustedAngle2 <= Math.PI) ||
+                             (robotAdjustedAngle2 >= -2*Math.PI && robotAdjustedAngle2 <= -Math.PI) ) {
+                            //rotationString = "-" + angle1;
+                            if ( (endPos.x + v4.height) < endPos.x ) {
+                                console.log('v3Slope 0, UP, v4.height < daeX');
+                                rotationString2 = "-" + angle2;
+                            }
+                            else if ( (endPos.x + v4.height) > endPos.x ) {
+                                console.log('v3Slope 0, UP, v4.height > daeX');
+                                rotationString2 = "+" + angle2;
+                            }
+                        }
+                        else if ( (robotAdjustedAngle2 > Math.PI && robotAdjustedAngle2 < 2*Math.PI) || 
+                                  (robotAdjustedAngle2 > -Math.PI && robotAdjustedAngle2 < 0) ) {                        
+                            if ( (endPos.x + v4.height) < endPos.x ) {
+                                console.log('v3Slope 0, DOWN, v4.height < daeX');
+                                rotationString2 = "+" + angle2;
+                            }
+                            else if ( (endPos.x + v4.height) > endPos.x ) {
+                                console.log('v3Slope 0, DOWN, v4.height > daeX');
+                                rotationString2 = "-" + angle2;
+                            }
+                        }
+                    }
+                    
+
+                    console.log('rotationString2: ' + rotationString2, ";", parseInt(rotationString2*180/Math.PI));
+                    //console.log('rotationString: ' + rotationString*(180/Math.PI));                    
+                    
+                    var targetAngleInRad = degToRad(controlsGUI.targetAngle);
+
+                    //console.log('angle to move to: ' + targetAngleInRad*(180/Math.PI));
+                    //console.log('robotAdjustedAngle: ' + radToDeg(robotAdjustedAngle));
+                    //console.log('robotAngle: ' + radToDeg(robotAngle));
+                    
+                    var rotation2 = { angle : updatedRotation };
+                    //var rotation2 = { angle : dae.rotation.y };
+                    //var rotation2 = { angle : robotAdjustedAngle };
+                    //var rotation2 = { angle : robotAngle };
+                    
+                    var tweenEnd = new TWEEN.Tween(rotation2)
+                        .to({ angle : rotationString2 }, controlsGUI.duration)
+                        .delay(controlsGUI.delay)
+                        .easing(easing)
+                        .onUpdate(function () {
+                            dae.rotation.y = rotation2.angle;
+                            //dae.rotation.y = -(0.5*Math.PI - rotation.angle);
+                            //dae.rotation.y = -(0.5*Math.PI - rotation2.angle);
+                            //console.log('dae.rotation.y: ' + dae.rotation.y*(180/Math.PI));
+                        })
+                        .onComplete(function () {
+                            console.log('Finished final rotation: ' + dae.rotation.y*(180/Math.PI));
+                            //lastAngle = angle;
+                        });                    
+                    
+
+                    if (performTranslation) {
+                        //moveJoint();
+                        tweenRotate.chain(tweenStart);
+                        tweenStart.chain(tweenEnd);
+                        tweenRotate.start();
+                    }
+                    else {
+                        //moveJoint();
+                        tweenEnd.start();
+                    }
+                    
+                }                
+                
+                
+                // NOTE: Working version using controlsGUI.speedX and controlsGUI.speedZ
+                function setupTween() {
+                    
+                    console.log('Start dae.rotation.y: ' + dae.rotation.y*(180/Math.PI));
+                    
+                    var update = function () {
+                        dae.position.x = startPos.x;
+                        //dae.position.y = startPos.y;
+                        dae.position.z = startPos.z;
+                    }
+                    
+                    TWEEN.removeAll();
+                    
+                    var easing	= TWEEN.Easing[controlsGUI.easing.split('.')[0]][controlsGUI.easing.split('.')[1]];
+                    
+                    var startPos = { x : dae.position.x, 
+                                     z : dae.position.z 
+                                   };
+                    var endPos = { x : dae.position.x + controlsGUI.speedX, 
+                                   z : dae.position.z + controlsGUI.speedZ 
+                                 };
+                    
+                    var angle = 0;
+                    var robotAngle = dae.rotation.y + 0.5*Math.PI;
+                    var speed = Math.sqrt( controlsGUI.speedX * controlsGUI.speedX + controlsGUI.speedZ * controlsGUI.speedZ );
+                    lastAngle = dae.rotation.y;
+                    controlsGUI.lastAngle = lastAngle;
+                    if (speed > 0.1) {
+                        console.log('in speed loop!');
+                        
+                        angle = Math.atan2(controlsGUI.speedX, controlsGUI.speedZ);
+                        controlsGUI.angle = angle;
+                        
+                        // Did the angle flip from +Pi to -Pi, or -Pi to +Pi?
+                        if (lastAngle < -3.0 && angle > 3.0) {
+                            robotAngle += Math.PI * 2.0;
+                        }
+                        else if (lastAngle > 3.0 && angle < -3.0) {
+                            robotAngle -= Math.PI * 2.0;
+                        }
+                        
+                        console.log('angle to move to: ' + angle*(180/Math.PI));
+                        console.log('robotAngle: ' + robotAngle);
+                    }
+                    //lastAngle = angle;
+                    
+                    var rotation = { angle : robotAngle };
+                    
+                    var rotationDir = 1; // counterclockwise by default
+                    var amount = angle - robotAngle;
+                    console.log('amount: ' + amount*(180/Math.PI));
+                    if (Math.abs(amount) > Math.PI) {
+                        rotationDir = -1; // clockwise
+                        amount = -(2.0 * Math.PI + amount);
+                    }
+                    
+                    var tweenRotate = new TWEEN.Tween(rotation)
+                        .to({ angle : angle }, controlsGUI.duration)
+                        .delay(controlsGUI.delay)
+                        .easing(easing)
+                        .onUpdate(function () {
+                            dae.rotation.y = -(0.5*Math.PI - rotation.angle);
+                            //console.log('dae.rotation.y: ' + dae.rotation.y*(180/Math.PI));
+                        })
+                        .onComplete(function () {
+                            console.log('Finished! dae.rotation.y: ' + dae.rotation.y*(180/Math.PI));
+                            //lastAngle = angle;
+                        });
+                    
+                    var tweenStart	= new TWEEN.Tween(startPos)
+                        .to(endPos, controlsGUI.duration)
+                        .delay(controlsGUI.delay)
+                        .easing(easing)
+                        .onUpdate(update);
+
+                    var tweenEnd	= new TWEEN.Tween(startPos)
+                        .to({ x : 0, z : 0}, controlsGUI.duration)
+                        .delay(controlsGUI.delay)
+                        .easing(easing)
+                        .onUpdate(update);
+                    
+                    //tweenStart.chain(tweenEnd);
+                    //tweenEnd.chain(tweenStart);
+
+                    tweenRotate.chain(tweenStart);
+                    tweenRotate.start();
+                    //tweenStart.start();                    
+                    
+                    // update the position of the robot
+//                    dae.position.x = endPos.x;
+//                    dae.position.y = endPos.y;
+                }                
+                
+
+                function moveJoint() {
+                    
+                    //console.log(TWEEN.getAll());
+                    TWEEN.removeAll();
+
+                    var jointIndex = findJointByName(controlsGUI.joint);
+                    console.log('controlsGUI.joint: ' + controlsGUI.joint);
+                    console.log('jointIndex: ' + jointIndex);
+
+                    var jointMin = kinematics.joints[jointIndex].limits.min;
+                    var jointMax = kinematics.joints[jointIndex].limits.max;
+
+                    //lastJointValue = jointMin;
+                    
+                    console.log('jointMin: ' + jointMin);
+                    console.log('jointMax: ' + jointMax);
+
+                    var update = function () {
+                        controlsGUI.index = jointIndex;
+                        controlsGUI.min = jointMin;
+                        controlsGUI.max = jointMax;
+
+                        // Iterate over all controllers
+                        //for (var i in gui.__controllers) {
+                        //    gui.__controllers[i].updateDisplay();
+                        //}
+
+                        lastJointValue = current.pos;
+                        
+                        kinematics.setJointValue( jointIndex, current.pos );
+                    };                    
+
+                    //update();
+
+                    //var position;
+                    //var old = kinematics.getJointValue(findJointByName(userOpts.joint)) || joint.zeroPosition;
+                    var current = { pos : lastJointValue || jointMin };
+                    //var current = { pos : jointMin };
+                    var target  = { pos : jointMax };
+
+
+                    //update();
+
+                    var easing	= TWEEN.Easing[controlsGUI.easing.split('.')[0]][controlsGUI.easing.split('.')[1]];                    
+
+                    var tweenHead	= new TWEEN.Tween(current)
+                        .to(target, controlsGUI.duration)
+                        .delay(controlsGUI.delay)
+                        .easing(easing)
+                        .onUpdate(update);
+
+                    var tweenBack	= new TWEEN.Tween(current)
+                        .to({pos: jointMin}, controlsGUI.duration)
+                        .delay(controlsGUI.delay)
+                        .easing(easing)
+                        .onUpdate(update);
+                    
+                    tweenJoint = tweenHead;
+
+                    tweenHead.chain(tweenBack);
+                    tweenBack.chain(tweenHead);
+
+                    tweenHead.start();
+
+                    //setTimeout( moveJoint, controlsGUI.delay );
+                }                
+                
+                
+                function handleMoveLink() {
+                    setDragging(false);
+                    
+                    var link = dae.getObjectByName('l_shoulder_lift_link');
+                    //var link2 = dae.getObjectByName('l_forearm_roll_link');
+                    //var link2 = dae.getObjectByName('l_wrist_roll_link');
+                    //var link2 = dae.getObjectByName('l_upper_arm_roll_link');
+                    //var link2 = dae.getObjectByName('l_gripper_palm_link');
+                    var link2 = dae.getObjectByName('l_gripper_l_finger_tip_link');
+                    var link3 = dae.getObjectByName('l_gripper_r_finger_tip_link');
+                    
+                    link2.updateMatrixWorld();
+                    link3.updateMatrixWorld();
+                    //dae.updateMatrixWorld();
+                    var pos1 = link2.getWorldPosition();
+                    var pos2 = link3.getWorldPosition();
+                    var position = pos1.add(pos2).divideScalar(2);
+                    //var position = link2.getWorldPosition();
+                    
+                    var arm = dae.getObjectByName(arm_link_name);
+                    //setupIK(position, link);
+                    performIK = true;
+                    drag_point_visual.visible = true;
+                    initIK(position, link2, arm);
+                    
+                    TWEEN.removeAll();
+                    
+                    var target  = { x : controlsGUI.newLinkX,
+                                    y : controlsGUI.newLinkY,
+                                    z : controlsGUI.newLinkZ
+                                  };
+//                    var target  = { x : position.x + controlsGUI.newLinkX,
+//                                    y : position.y + controlsGUI.newLinkY,
+//                                    z : position.z + controlsGUI.newLinkZ
+//                                  };
+                    
+
+                    var easing	= TWEEN.Easing[controlsGUI.easing.split('.')[0]][controlsGUI.easing.split('.')[1]];                    
+                    var distance = position.distanceTo(target);
+                    //var vector = new THREE.Vector3();
+
+                    var tweenHead	= new TWEEN.Tween(position)
+                        .to(target, controlsGUI.duration)
+                        .delay(controlsGUI.delay)
+                        .easing(easing)
+                        .onUpdate(function () {
+                            //performIK = true;
+                            //drag_point_visual.visible = true;
+                            //link.updateMatrixWorld();
+                            //position = link.getWorldPosition();
+                            distance = position.distanceTo(target);
+                            console.log('distance to target: ' + distance);
+                            //setupIK(position, link);
+                            //solveIK();
+                            //ctx.clearRect(0, 0, renderer2d.domElement.width, renderer2d.domElement.height);
+                            //ctx.beginPath();
+                            //ctx.arc( projected_point2.x, projected_point2.y, radius + thickness, 0, TWO_PI );
+                            //ctx.lineWidth = thickness;
+                            //ctx.globalAlpha = 0.5;
+                            //ctx.strokeStyle = '#c4842b';
+                            //ctx.stroke();
+                            
+                            point3d.set(position.x, position.y, position.z);
+                            //vector.set(position.x, position.y, position.z);
+                            //var vector = new THREE.Vector3();
+                            //vector = link.getWorldPosition();
+                            projected_point2 = cameraProject(point3d, renderer2d.domElement.width, renderer2d.domElement.height);
+                            //projected_point2 = cameraProject(point3d, window.innerWidth, window.innerHeight);
+                            //projected_point2 = cameraProject(vector, window.innerWidth, window.innerHeight);
+                            console.log("projected_point2.x: " + projected_point2.x + ", projected_point2.y: " + projected_point2.y);
+                            solver.screen_point = [projected_point2.x, projected_point2.y];
+                            solver.timeSolve(0.1);
+                            //solver.timeSolve(controlsGUI.duration / 1000);
+                            for (var i = 0; i < N_JOINTS; i++) {
+                                kinematics.setJointValue(arm_joint_idx + i, solver.getJointValue(i));
+                            }                            
+                            //kinematics.setJointValue(findJointByName('l_shoulder_lift_link'), solver.angle);
+                        })
+                        .onComplete(function () {
+                            performIK = false;
+                            drag_point_visual.visible = false;
+                        });
+
+                    //var tweenBack	= new TWEEN.Tween(current)
+                    //    .to({pos: jointMin}, controlsGUI.duration)
+                    //    .delay(controlsGUI.delay)
+                    //    .easing(easing)
+                    //    .onUpdate(update);
+
+                    //tweenHead.chain(tweenBack);
+                    //tweenBack.chain(tweenHead);
+
+                    tweenHead.start();
+                }
+                
+                
+                function adjustAngle(angle) {
+                    var newAngle = angle;
+                    if (newAngle >= -2*Math.PI && newAngle <= 2*Math.PI) {
+                        //console.log('Angle is valid', newAngle);
+                        //console.log('angle: ' + radToDeg(newAngle));
+                        return newAngle;
+                    }
+                    if (newAngle > 2*Math.PI) {
+                        //console.log('Angle is greater than 2*PI', radToDeg(newAngle));
+                        newAngle -= 2*Math.PI;
+                        //console.log('angle: ' + radToDeg(newAngle));
+                        return adjustAngle(newAngle);
+                    }
+                    else if (newAngle < -2*Math.PI) {
+                        //console.log('Angle is less than than -2*PI', radToDeg(newAngle));
+                        newAngle += 2*Math.PI;
+                        //console.log('angle: ' + radToDeg(newAngle));
+                        return adjustAngle(newAngle);
+                    }
+                }                
+                
+
+                function onWindowResize() {
+
+                    camera.aspect = window.innerWidth / window.innerHeight;
+                    camera.updateProjectionMatrix();
+
+                    renderer.setSize( window.innerWidth, window.innerHeight );
+                    renderer2d.setSize( window.innerWidth, window.innerHeight );
+
+                }
+
+                function animate() {
+                    render();
+                    stats.update();
+                    TWEEN.update();
+                }
+
+                function updateGripperGuides() {
+                    var initials = ['l','r'];
+                    for (var i = 0; i < 2; i++) {
+                        gripper_guide = gripper_guides[i];
+                        gripper_guide.geometry.vertices[0].addVectors( dae.getObjectByName(initials[i] + "_gripper_l_finger_tip_link").getWorldPosition(), dae.getObjectByName(initials[i] + "_gripper_r_finger_tip_link").getWorldPosition() );                        
+                        gripper_guide.geometry.vertices[0].divideScalar(2.0);
+                        // l_gripper_guide.geometry.vertices[0].y -= 0.6;
+                        gripper_guide.geometry.vertices[1] = gripper_guide.geometry.vertices[0].clone();
+                        gripper_guide.geometry.vertices[1].y = 0;
+                        gripper_guide.geometry.verticesNeedUpdate = true;
+                    }
+                }
+
+                function render() {
+                    // update l_gripper_guide
+                    updateGripperGuides();
+                    // project point
+                    //projectPoint();
+                    // clear canvas
+                    ctx = renderer2d.domElement.getContext('2d');
+                    ctx.clearRect(0, 0, renderer2d.domElement.width, renderer2d.domElement.height);
+                    // update the camera controls
+                    controls.update();
+                    // draw the dragging indicator
+                    if (dragging_object) {
+                        solveIK();
+                        // draw annulus around cursor
+                        ctx.beginPath();
+                        ctx.arc( cursor.x, cursor.y, radius + thickness, 0, TWO_PI );
+                        //ctx.arc( projected_point.x, projected_point.y, radius + thickness, 0, TWO_PI );
+                        ctx.lineWidth = thickness;
+                        ctx.globalAlpha = 0.5;
+                        ctx.strokeStyle = '#CC6666';
+                        ctx.stroke();
+                    }
+                    if (performIK) {
+                        //solveIK();
+                        // draw annulus around cursor
+                        ctx.beginPath();
+                        ctx.arc( projected_point2.x, projected_point2.y, radius + thickness, 0, TWO_PI );
+                        ctx.lineWidth = thickness;
+                        ctx.globalAlpha = 0.5;
+                        ctx.strokeStyle = '#efec45';
+                        //ctx.strokeStyle = '#c4842b';
+                        ctx.stroke();
+                    }                    
+                    renderer.render( scene, camera );
+                }
+
+                // Returns a random integer between min (inclusive) and max (inclusive)
+                // Using Math.round() will give you a non-uniform distribution!
+
+                function getRandomInt( min, max ) {
+
+                    return Math.floor( Math.random() * ( max - min + 1 ) ) + min;
+
+                }
+
+            </script>
+
+        </div>
+    </body>
+</html>

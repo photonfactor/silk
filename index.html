@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+
+<html lang="en">
+
+    <head>
+        <title>Silk - Home</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+        <link rel="stylesheet" type="text/css" href="css/silk.css">
+    </head>
+
+    <body>
+        <div class="column">
+            <div class="navigation">
+                <a href="./about.html">About</a>
+            </div>
+        </div>
+        <div class="column" style="padding-left: 40px; padding-top: 40px">
+            <!-- roslibjs's interactive markers with Silk's IK -->
+            <!-- Axis snapping (Sketchup-style) -->
+            <!-- camera-plane dragging (with planar guide) -->
+
+            <!-- Leeper condition 3 (click to init pose) -->
+            <!-- Snap-to-world with a fake mesh scene -->
+            <!-- User controls wrist position, gripper orients to "reach" for closest scene point -->
+
+            <!-- think about "challenge problem" like pouring a cup of tea -->
+            <!-- how to display the option to perform complex actions like grasping, and render plan to show when likely to fail? -->
+
+            <!-- make interactive marker + IK work with UR5 and Fetch -->
+            <!-- control only 1 or 2 joints at a time (for instance, hover link and its parent) -->
+
+            <!-- put a few IK regularization options in a menu (function type, function params, scaling/weighting) -->
+            <!-- Multi-touch IK (naive is probably not useful, but fun exercise!) -->
+
+            <!-- Viewpoint Experiments -->
+                <!-- Double tap on scene element to set camera focus (like iOS Safari) -->
+                <!-- Tilt device to swivel camera -->
+                <!-- Buttons for different camera perspectives -->
+                <!-- Render scene from robot's perspective -->
+
+            <!-- Probably won't impl -->
+                <!-- Render textured KinectFusion mesh -->
+                <!-- Render pointcloud (roslibjs shader) -->
+                <!-- Concealing missing parts of pointcloud ("fog of war") -->
+                <!-- "Arm flight control" using device tilt -->
+                <!-- Physics sim of PR2 (https://github.com/jicksta/threejs-collada-physics/blob/physijs/demo.html) -->
+                <!-- Use physics sim to control PR2 -->
+                <!-- Storyboarding of motions (panels, motion arrows) -->
+
+
+            <a class="preview-image-box" href="scenes/snap_to_object" style="background-image:url(scenes/snap_to_object/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Snap to Object</div>
+                    <div class="description">The PR2 gripper snaps to the XZ plane.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/interactive_marker" style="background-image:url(scenes/interactive_marker/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Interactive Marker</div>
+                    <div class="description">Manipulator from the ROS Interactive Markers package.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/regularized_ik" style="background-image:url(scenes/regularized_ik/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Regularized IK</div>
+                    <div class="description">To discourage large motions, a Huber loss is imposed on the joint deltas.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/full_ik" style="background-image:url(scenes/full_ik/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Full IK</div>
+                    <div class="description">Moving the full PR2 arm by dragging.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/ur5" style="background-image:url(scenes/ur5/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">UR5 Robot</div>
+                    <div class="description">A basic animation of the UR5 robot.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/fetch" style="background-image:url(scenes/fetch/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Fetch Robot</div>
+                    <div class="description">A basic animation of the Fetch robot.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/joint_snapping" style="background-image:url(scenes/joint_snapping/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Joint Snapping</div>
+                    <div class="description">The PR2 shoulder snaps into place.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/simple_ik" style="background-image:url(scenes/simple_ik/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Simple IK</div>
+                    <div class="description">Rotate the PR2 shoulder by dragging.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/colorization_iii" style="background-image:url(scenes/colorization_iii/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Colorization III</div>
+                    <div class="description">A lightness gradient running down the kinematic tree.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/colorization_ii" style="background-image:url(scenes/colorization_ii/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Colorization II</div>
+                    <div class="description">High-contrast color variation; bilaterally symmetrical.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/colorization_i" style="background-image:url(scenes/colorization_i/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Colorization I</div>
+                    <div class="description">A hue gradient running down the kinematic tree.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/gripper_guides" style="background-image:url(scenes/gripper_guides/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Gripper Guides</div>
+                    <div class="description">Vertical guides help the eye gauge the 3D position of the PR2 grippers.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/avoider" style="background-image:url(scenes/avoider/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Solver-Based UI</div>
+                    <div class="description">Ceres Solver tries to maintain a fixed distance between the cursor and circle.</div>
+                </div>
+            </a>
+            <a class="preview-image-box" href="scenes/basic_animation" style="background-image:url(scenes/basic_animation/thumb.png)"> 
+                <div class="preview-text-box"> 
+                    <div class="title">Basic Animation</div>
+                    <div class="description">The PR2 smoothly interpolates between random keyframes.</div>
+                </div>
+            </a>
+
+        </div>
+    </body>
+</html>
+
